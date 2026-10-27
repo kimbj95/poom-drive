@@ -32,11 +32,12 @@
 | AAOS Car API | 차속, 기어, 외기 온도, 주행 제한 상태 |
 | Pleos NaviHelper | 현재 위치, 경로 요청, 경유지 추가 |
 | Pleos TTS·STT | 온디바이스(ON_DEVICE) 음성 안내와 짧은 대답 인식 |
+| Android 표준 | 부팅 완료 시 자동 시작, 휴대폰 블루투스 연결 시 시작 알림, 포그라운드 서비스 |
 | 공공데이터 | 전국졸음쉼터표준데이터 253곳 (한국도로공사) |
 | 콘텐츠 | 저작권 보호 기간이 끝난 동화, 방정환 「만년 셔츠」(한국어 위키문헌, PD-old-70) |
 
 ## 검증
-- Pleos Connect Emulator v2.1.0에서 핵심 기능 13개 항목을 시험했습니다. 상세 결과와 화면은 [docs/verification.md](docs/verification.md)에 있습니다.
+- Pleos Connect Emulator v2.1.0에서 핵심 기능 18개 항목을 시험했습니다. 상세 결과와 화면은 [docs/verification.md](docs/verification.md)에 있습니다.
 
 ## 개발 환경
 - 언어: Kotlin
@@ -66,6 +67,9 @@ adb shell am broadcast --user 10 -a com.seattlegymsquad.poomdrive.DEMO -n com.se
 | `mode:auto` 등 | 탑승 모드 (`auto`, `child`, `parent`, `pet`, `solo`) |
 | `trigger:rest` 등 | 기능 즉시 실행 (`rest`, `ventilation`, `heat`, `boarding`, `story`, `posture`, `brake`, `end`) |
 | `drive:<초>` | 연속 주행 시간 지정 |
+| `away:<초>` | 지정한 시간 동안 Suspend 후 복귀한 상황 재현 (대기 안내 폐기, 정차 시간 반영) |
+| `service:stop` | 케어 서비스 종료 (Suspend 중 앱이 종료된 상황 재현) |
+| `bt:connected` | 휴대폰 블루투스 연결 신호 대체 (에뮬레이터 블루투스 미지원) |
 | `status` | 현재 상태 로그 출력 |
 
 ## 폴더 구조
