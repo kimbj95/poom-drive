@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">품 드라이브</string>
+    <string name="notification_channel">동승자 케어</string>
+    <string name="notification_text">탑승자를 살피고 음성으로 안내하고 있어요</string>
+</resources>

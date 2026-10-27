@@ -1,0 +1,443 @@
+package com.seattlegymsquad.poomdrive.care
+
+import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import com.seattlegymsquad.poomdrive.data.RestAreaRepository
+import com.seattlegymsquad.poomdrive.data.StoryBook
+import com.seattlegymsquad.poomdrive.log
+import com.seattlegymsquad.poomdrive.navi.NaviAgent
+import com.seattlegymsquad.poomdrive.navi.StopResult
+import com.seattlegymsquad.poomdrive.vehicle.Gear
+import com.seattlegymsquad.poomdrive.vehicle.VehicleListener
+import com.seattlegymsquad.poomdrive.vehicle.VehicleState
+import com.seattlegymsquad.poomdrive.voice.Answer
+import com.seattlegymsquad.poomdrive.voice.Answers
+import com.seattlegymsquad.poomdrive.voice.PassengerType
+import com.seattlegymsquad.poomdrive.voice.VoiceAgent
+import kotlin.math.abs
+import kotlin.math.roundToInt
+
+private enum class DrivingEvent { BRAKE, ACCEL, TURN }
+
+/**
+ * The care rules. While parked it finds out who is on board and runs the boarding checks; while driving it
+ * watches driving events, air, temperature and driving time and speaks; after parking it gives the trip score.
+ * Everything runs on the main thread, driven by vehicle events and a one-second tick.
+ */
+class CareEngine(
+    private val context: Context,
+    private val state: VehicleState,
+    private val voice: VoiceAgent,
+    private val navi: NaviAgent,
+    private val store: TripStore,
+    private val demo: DemoSettings,
+    private val restAreas: RestAreaRepository,
+    private val stories: StoryBook,
+) : VehicleListener {
+
+    private val main = Handler(Looper.getMainLooper())
+    private val trip get() = store.trip
+    private val speedSamples = ArrayDeque<Pair<Long, Float>>()
+    private var speedLatchUntil = 0L
+    private var turnLatchUntil = 0L
+    private var lastAlertAt = 0L
+    private var askingPassenger = false
+    private var tripEnd: Runnable? = null
+
+    private val ticker = object : Runnable {
+        override fun run() {
+            tick()
+            main.postDelayed(this, TICK_MS)
+        }
+    }
+
+    fun start() {
+        main.post(ticker)
+        log("care engine started, mode=${mode()}")
+    }
+
+    fun stop() {
+        main.removeCallbacks(ticker)
+        store.save(force = true)
+    }
+
+    fun mode(): CareMode = when (store.userMode) {
+        UserMode.AUTO -> when (trip.passengerType) {
+            PassengerType.CHILD -> CareMode.CHILD
+            PassengerType.PARENT -> CareMode.PARENT
+            PassengerType.PET -> CareMode.PET
+            PassengerType.NONE -> CareMode.SOLO
+            null -> if (state.hasPassenger()) CareMode.PASSENGER else CareMode.SOLO
+        }
+        UserMode.CHILD -> CareMode.CHILD
+        UserMode.PARENT -> CareMode.PARENT
+        UserMode.PET -> CareMode.PET
+        UserMode.SOLO -> CareMode.SOLO
+    }
+
+    fun setUserMode(mode: UserMode) {
+        store.userMode = mode
+        // A choice made before departure runs the boarding checks for that mode; while driving it only switches rules.
+        if (state.parked() && !trip.active) {
+            trip.boardingDone = false
+            trip.passengerType = null
+        }
+        log("user mode $mode -> care mode ${mode()}")
+    }
+
+    // ---------------------------------------------------------------- tick
+    private fun tick() {
+        val step = demo.timeScale.toLong()
+        val moving = state.gear != Gear.PARK && state.gear != Gear.UNKNOWN
+        if (moving) {
+            if (!trip.active) startTrip()
+            trip.drivingSec += step
+            trip.continuousSec += step
+            trip.parkedSec = 0
+        } else if (trip.continuousSec > 0) {
+            trip.parkedSec += step
+            if (trip.parkedSec >= CareConfig.REST_RESET_SEC) {
+                trip.continuousSec = 0
+                trip.lastPostureSec = 0
+                trip.lastRestAskSec = -1
+                // A short trip that was never scored ends quietly after a long stop.
+                if (trip.active) {
+                    trip.active = false
+                    trip.passengerType = null
+                    trip.boardingDone = false
+                    trip.storyRequested = false
+                }
+            }
+        }
+        trip.recirculationSec = if (state.recirculationOn == true) trip.recirculationSec + step else 0
+        if (moving) {
+            checkVentilation()
+            checkHeat()
+            checkRest()
+            checkPosture()
+        } else if (state.parked()) {
+            checkBoarding()
+        }
+        store.save()
+    }
+
+    private fun startTrip() {
+        trip.active = true
+        // Once the car moves, boarding is over; it is checked again only after everyone gets out.
+        trip.boardingDone = true
+        trip.drivingSec = 0
+        trip.hardBrakes = 0
+        trip.hardAccels = 0
+        trip.sharpTurns = 0
+        trip.lastVentilationSec = -1
+        trip.lastHeatSec = -1
+        log("trip start, mode=${mode()}, continuous=${trip.continuousSec}s")
+        if (trip.storyRequested && mode() == CareMode.CHILD) {
+            main.postDelayed({ if (!state.parked()) voice.startStory(stories.parts) }, STORY_DELAY_MS)
+        }
+        store.save(force = true)
+    }
+
+    // ---------------------------------------------------------------- boarding (parked)
+    /** Runs once per boarding: before departure, until all passengers have left again. */
+    private fun checkBoarding() {
+        if (trip.active || trip.boardingDone || askingPassenger || voice.busy) return
+        when (store.userMode) {
+            UserMode.AUTO -> if (state.hasPassenger() && trip.passengerType == null) askPassenger()
+            UserMode.CHILD, UserMode.PARENT, UserMode.PET -> boardingFlow(mode())
+            UserMode.SOLO -> trip.boardingDone = true
+        }
+    }
+
+    private fun askPassenger() {
+        askingPassenger = true
+        voice.ask("동승자가 탔네요. 아이, 부모님, 반려견 중에 누구와 함께 가세요?", { Answers.passenger(it) }) { result, _ ->
+            askingPassenger = false
+            val type = result as? PassengerType
+            if (type == null) {
+                trip.boardingDone = true
+                voice.say("잘 못 들었어요. 동승자 모드로 살필게요. 화면에서 바꿀 수 있어요.")
+            } else {
+                trip.passengerType = type
+                boardingFlow(mode())
+            }
+            store.save(force = true)
+        }
+    }
+
+    private fun boardingFlow(mode: CareMode) {
+        trip.boardingDone = true
+        when (mode) {
+            CareMode.CHILD -> {
+                voice.say("출발 전에 카시트를 확인해 주세요. 보조 좌석은 뒷좌석에만, 좌석 벨트 하나에 한 명만, 장착한 뒤 흔들어서 고정됐는지 봐 주세요.")
+                voice.askYesNo("출발하면 ${stories.title}라는 동화를 들려줄까요?") { answer ->
+                    trip.storyRequested = answer == Answer.YES
+                    if (trip.storyRequested) voice.say("좋아요. 출발하면 읽어 줄게요.")
+                    store.save(force = true)
+                }
+            }
+            CareMode.PARENT -> voice.say("부모님과 함께 가시네요. 급제동이나 급회전이 있으면 바로 알려 드릴게요.")
+            CareMode.PET -> voice.say("반려견과 함께 가시네요. 실내 온도와 환기를 살피고, 두 시간마다 쉬어 가자고 알려 드릴게요.")
+            CareMode.PASSENGER -> voice.say("동승자와 함께 가시네요. 부드럽게 운전하실 수 있게 도와 드릴게요.")
+            CareMode.SOLO -> Unit
+        }
+        store.save(force = true)
+    }
+
+    override fun onOccupancyChanged() {
+        // Everyone got out: the next passenger who gets in is a new boarding.
+        if (state.parked() && !trip.active && !state.hasPassenger()) {
+            trip.passengerType = null
+            trip.boardingDone = false
+        }
+    }
+
+    // ---------------------------------------------------------------- driving events
+    override fun onSpeed(kmh: Float, timeMs: Long) {
+        speedSamples.addLast(timeMs to kmh)
+        while (speedSamples.size > 2 && timeMs - speedSamples.first().first > SPEED_WINDOW_MS * 2) speedSamples.removeFirst()
+        if (timeMs < speedLatchUntil) return
+        val reference = speedSamples.lastOrNull { timeMs - it.first >= SPEED_WINDOW_MS } ?: return
+        val rate = (kmh - reference.second) / ((timeMs - reference.first) / 1000f)
+        val event = when {
+            rate <= -CareConfig.HARD_BRAKE_KMH_PER_S && reference.second >= CareConfig.EVENT_MIN_KMH -> DrivingEvent.BRAKE
+            rate >= CareConfig.HARD_ACCEL_KMH_PER_S && kmh >= CareConfig.EVENT_MIN_KMH -> DrivingEvent.ACCEL
+            else -> return
+        }
+        speedLatchUntil = timeMs + EVENT_LATCH_MS
+        onDrivingEvent(event)
+    }
+
+    override fun onSteering(deg: Float, timeMs: Long) {
+        if (abs(deg) < CareConfig.SHARP_TURN_DEG || state.speedKmh < CareConfig.SHARP_TURN_MIN_KMH) return
+        if (timeMs < turnLatchUntil) return
+        turnLatchUntil = timeMs + EVENT_LATCH_MS
+        onDrivingEvent(DrivingEvent.TURN)
+    }
+
+    private fun onDrivingEvent(event: DrivingEvent) {
+        if (!trip.active) return
+        when (event) {
+            DrivingEvent.BRAKE -> trip.hardBrakes++
+            DrivingEvent.ACCEL -> trip.hardAccels++
+            DrivingEvent.TURN -> trip.sharpTurns++
+        }
+        log("driving event $event (brakes=${trip.hardBrakes}, accels=${trip.hardAccels}, turns=${trip.sharpTurns})")
+        val mode = mode()
+        val now = SystemClock.elapsedRealtime()
+        if (mode == CareMode.SOLO || now - lastAlertAt < CareConfig.ALERT_COOLDOWN_MS) return
+        lastAlertAt = now
+        val who = when (mode) {
+            CareMode.CHILD -> "아이가"
+            CareMode.PARENT -> "부모님이"
+            CareMode.PET -> "반려견이"
+            else -> "동승자가"
+        }
+        val text = when (event) {
+            DrivingEvent.BRAKE -> "$who 앞으로 쏠렸어요. 조금 일찍, 부드럽게 멈춰 보세요."
+            DrivingEvent.ACCEL -> "$who 뒤로 쏠렸어요. 조금 천천히 속도를 올려 보세요."
+            DrivingEvent.TURN -> "회전 전에 속도를 조금 줄이면 $who 편해요."
+        }
+        voice.say(text, urgent = true)
+    }
+
+    override fun onGearChanged(gear: Gear) {
+        if (gear == Gear.PARK) {
+            voice.stopStory()
+            if (trip.active && trip.drivingSec >= CareConfig.MIN_TRIP_SEC) {
+                val end = Runnable { if (state.parked()) endTrip() }
+                tripEnd = end
+                main.postDelayed(end, TRIP_END_DELAY_MS)
+            }
+        } else {
+            tripEnd?.let { main.removeCallbacks(it) }
+            tripEnd = null
+        }
+    }
+
+    // ---------------------------------------------------------------- rules while driving
+    private fun checkVentilation() {
+        if (trip.recirculationSec < CareConfig.VENTILATION_AFTER_SEC) return
+        if (trip.lastVentilationSec >= 0 && trip.drivingSec - trip.lastVentilationSec < CareConfig.VENTILATION_REPEAT_SEC) return
+        trip.lastVentilationSec = trip.drivingSec
+        val minutes = trip.recirculationSec / 60
+        val text = if (mode() == CareMode.PET) {
+            "내기순환이 ${minutes}분째예요. 반려견을 위해 1분이나 2분만 외기로 바꿔 보세요."
+        } else {
+            "내기순환이 ${minutes}분째예요. 1분이나 2분만 외기로 바꿔 보세요."
+        }
+        voice.say(text)
+    }
+
+    private fun checkHeat() {
+        val mode = mode()
+        if (mode == CareMode.SOLO) return
+        val cabin = demo.fakeCabinTempC.takeUnless { it.isNaN() } ?: state.cabinTempC ?: return
+        val target = state.setTempC ?: return
+        val over = cabin - target
+        if (over < store.heatMarginC) return
+        if (trip.lastHeatSec >= 0 && trip.drivingSec - trip.lastHeatSec < CareConfig.HEAT_REPEAT_SEC) return
+        trip.lastHeatSec = trip.drivingSec
+        val who = if (mode == CareMode.PET) "반려견이" else "뒷좌석이"
+        voice.say("$who 더울 수 있어요. 실내가 설정보다 ${over.roundToInt()}도 높아요. 풍량을 한 단계 올려 보세요.")
+    }
+
+    private fun checkRest() {
+        if (trip.continuousSec < CareConfig.REST_AFTER_SEC) return
+        if (trip.lastRestAskSec >= 0 && trip.continuousSec - trip.lastRestAskSec < CareConfig.REST_REASK_SEC) return
+        if (voice.busy && !voice.storyPlaying) return
+        trip.lastRestAskSec = trip.continuousSec
+        askRest()
+    }
+
+    /** Offers the nearest drowsy-driving rest area and adds it to the route when the driver says yes. */
+    fun askRest() {
+        val question = if (mode() == CareMode.PET) {
+            "두 시간 넘게 달렸어요. 반려견도 쉬어 갈 겸, 가까운 졸음쉼터에 들를까요?"
+        } else {
+            "두 시간 넘게 달렸어요. 가까운 졸음쉼터에 들를까요?"
+        }
+        voice.askYesNo(question) { answer ->
+            log("rest answer $answer")
+            when (answer) {
+                Answer.YES -> addNearestRestStop()
+                Answer.NO -> voice.say("알겠어요. 조금 뒤에 다시 여쭤볼게요.")
+                Answer.UNKNOWN -> voice.say("조금 뒤에 다시 여쭤볼게요.")
+            }
+        }
+    }
+
+    private fun addNearestRestStop() {
+        navi.requestLocation { location ->
+            if (location == null) {
+                voice.say("지금 위치를 알 수 없어서 졸음쉼터를 찾지 못했어요.")
+                return@requestLocation
+            }
+            val found = restAreas.nearest(location.first, location.second, needToilet = mode() != CareMode.SOLO)
+            if (found == null) {
+                voice.say("가까운 졸음쉼터를 찾지 못했어요.")
+                return@requestLocation
+            }
+            val (area, km) = found
+            val name = "${area.name} 졸음쉼터"
+            log("nearest rest area $name ${"%.1f".format(km)}km (${area.route}, ${area.direction})")
+            navi.addStop(name, area.lat, area.lng) { result ->
+                log("add stop $result")
+                val distance = km.roundToInt()
+                voice.say(
+                    when (result) {
+                        StopResult.ADDED_AS_WAYPOINT -> "${name}를 경유지로 넣었어요. 약 ${distance}킬로미터 거리예요."
+                        StopResult.ROUTED_AS_DESTINATION -> "${name}로 길안내를 시작할게요. 약 ${distance}킬로미터 거리예요."
+                        StopResult.WAYPOINTS_FULL -> "경유지가 이미 두 곳이라 더 넣을 수 없어요. 정차한 뒤 내비에서 바꿔 주세요."
+                        StopResult.NOT_CONNECTED -> "내비게이션과 연결되지 않아 경유지를 넣지 못했어요."
+                    }
+                )
+            }
+        }
+    }
+
+    private fun checkPosture() {
+        if (mode() != CareMode.SOLO) return
+        if (trip.continuousSec - trip.lastPostureSec < CareConfig.POSTURE_AFTER_SEC) return
+        if (state.speedKmh >= 1f || state.gear != Gear.DRIVE || voice.busy) return
+        trip.lastPostureSec = trip.continuousSec
+        voice.say("신호 대기 중이에요. 어깨와 허리를 한 번 쭉 펴 보세요.")
+    }
+
+    // ---------------------------------------------------------------- end of trip
+    private fun endTrip() {
+        val mode = mode()
+        val score = (100 - 5 * (trip.hardBrakes + trip.hardAccels + trip.sharpTurns)).coerceAtLeast(0)
+        val summary = TripSummary(
+            score, trip.hardBrakes, trip.hardAccels, trip.sharpTurns, trip.drivingSec / 60, mode,
+            sickness = null, endedAt = System.currentTimeMillis(),
+        )
+        store.lastTrip = summary
+        log("trip end: $summary")
+        if (mode == CareMode.SOLO) {
+            voice.say("운전 수고하셨어요. 오늘 흔들림 점수는 ${score}점이에요.")
+            if (trip.continuousSec >= CareConfig.REST_AFTER_SEC) voice.say("내리기 전에 손목 당기기, 목과 어깨 풀기를 15초씩 해 보세요.")
+        } else {
+            voice.say("도착했어요. 오늘 흔들림 점수는 ${score}점이에요.")
+            voice.askYesNo("뒷좌석 멀미는 괜찮았나요?") { answer ->
+                store.lastTrip = summary.copy(sickness = answer)
+                when (answer) {
+                    Answer.YES -> voice.say("다행이에요. 기록해 둘게요.")
+                    Answer.NO -> voice.say("알려 주셔서 고마워요. 다음에는 급제동과 급회전 때 더 일찍 알려 드릴게요.")
+                    Answer.UNKNOWN -> Unit
+                }
+            }
+        }
+        // Passengers usually stay on board between legs, so the boarding check is not repeated on arrival.
+        trip.active = false
+        trip.storyRequested = false
+        store.save(force = true)
+    }
+
+    // ---------------------------------------------------------------- demo and tests
+    /** Commands from the demo panel or adb: `timescale:60`, `cabin:31`, `answer:yes`, `trigger:rest`, ... */
+    fun onDemoCommand(command: String) {
+        log("demo command: $command")
+        val name = command.substringBefore(':')
+        val arg = command.substringAfter(':', "")
+        when (name) {
+            "timescale" -> demo.timeScale = arg.toIntOrNull() ?: 1
+            "cabin" -> demo.fakeCabinTempC = arg.toFloatOrNull() ?: Float.NaN
+            "answer" -> voice.injectedAnswer = arg.takeIf { it.isNotEmpty() && it != "off" }?.let(::answerAudio)
+            "mode" -> setUserMode(UserMode.valueOf(arg.uppercase()))
+            "drive" -> trip.continuousSec = arg.toLongOrNull() ?: trip.continuousSec
+            "route" -> arg.split(",").takeIf { it.size >= 3 }?.let { p ->
+                navi.addStop(p[2], p[0].toDouble(), p[1].toDouble()) { log("demo route $it") }
+            }
+            "cancelroute" -> navi.cancelRoute()
+            "trigger" -> when (arg) {
+                "rest" -> askRest()
+                "ventilation" -> {
+                    trip.recirculationSec = maxOf(trip.recirculationSec, CareConfig.VENTILATION_AFTER_SEC)
+                    trip.lastVentilationSec = -1
+                    checkVentilation()
+                }
+                "heat" -> {
+                    trip.lastHeatSec = -1
+                    checkHeat()
+                }
+                "boarding" -> {
+                    trip.boardingDone = false
+                    trip.passengerType = null
+                    checkBoarding()
+                }
+                "story" -> voice.startStory(stories.parts)
+                "posture" -> {
+                    trip.lastPostureSec = trip.continuousSec - CareConfig.POSTURE_AFTER_SEC
+                    checkPosture()
+                }
+                "brake" -> onDrivingEvent(DrivingEvent.BRAKE)
+                "end" -> endTrip()
+            }
+            "stopstory" -> voice.stopStory()
+            "status" -> log(statusLine())
+        }
+        store.save(force = true)
+    }
+
+    private fun answerAudio(name: String): ByteArray? = runCatching {
+        context.assets.open("demo/answer_$name.pcm").use { it.readBytes() }
+    }.onFailure { log("no demo answer '$name'") }.getOrNull()
+
+    fun statusLine() =
+        "mode=${mode()} user=${store.userMode} gear=${state.gear} speed=${"%.0f".format(state.speedKmh)} " +
+            "passengers=${state.passengerSeats()} type=${trip.passengerType} trip=${trip.active} " +
+            "driving=${trip.drivingSec}s continuous=${trip.continuousSec}s recirculation=${trip.recirculationSec}s " +
+            "cabin=${state.cabinTempC} set=${state.setTempC} fake=${demo.fakeCabinTempC} scale=${demo.timeScale} " +
+            "events=${trip.hardBrakes}/${trip.hardAccels}/${trip.sharpTurns} navi=${navi.status} ux=${state.drivingRestricted}"
+
+    private companion object {
+        const val TICK_MS = 1_000L
+        const val SPEED_WINDOW_MS = 1_000L
+        const val EVENT_LATCH_MS = 5_000L
+        const val TRIP_END_DELAY_MS = 3_000L
+        const val STORY_DELAY_MS = 5_000L
+    }
+}
