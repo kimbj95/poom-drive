@@ -45,6 +45,9 @@ class CareEngine(
     private var lastAlertAt = 0L
     private var askingPassenger = false
     private var tripEnd: Runnable? = null
+    private var lastTickAt = 0L
+    private var movingAtLastTick = false
+    private var offSince = 0L
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -54,6 +57,8 @@ class CareEngine(
     }
 
     fun start() {
+        // A new process: the last save tells since when the app was not running (car off, process killed).
+        offSince = store.savedAt
         main.post(ticker)
         log("care engine started, mode=${mode()}")
     }
@@ -90,26 +95,16 @@ class CareEngine(
     // ---------------------------------------------------------------- tick
     private fun tick() {
         val step = demo.timeScale.toLong()
+        countTimeAway()
         val moving = state.gear != Gear.PARK && state.gear != Gear.UNKNOWN
+        movingAtLastTick = moving
         if (moving) {
             if (!trip.active) startTrip()
             trip.drivingSec += step
             trip.continuousSec += step
             trip.parkedSec = 0
-        } else if (trip.continuousSec > 0) {
-            trip.parkedSec += step
-            if (trip.parkedSec >= CareConfig.REST_RESET_SEC) {
-                trip.continuousSec = 0
-                trip.lastPostureSec = 0
-                trip.lastRestAskSec = -1
-                // A short trip that was never scored ends quietly after a long stop.
-                if (trip.active) {
-                    trip.active = false
-                    trip.passengerType = null
-                    trip.boardingDone = false
-                    trip.storyRequested = false
-                }
-            }
+        } else {
+            addStop(step)
         }
         trip.recirculationSec = if (state.recirculationOn == true) trip.recirculationSec + step else 0
         if (moving) {
@@ -121,6 +116,48 @@ class CareEngine(
             checkBoarding()
         }
         store.save()
+    }
+
+    /**
+     * Counts the time the app could not see as a stop: the car was switched off, or the head unit slept (Suspend).
+     * Within one process the gap shows in elapsedRealtime, which keeps counting in deep sleep; after a restart
+     * only the time of the last save can show it. Without this, a driver who rests with the engine off would
+     * be asked to rest again soon after setting off.
+     */
+    private fun countTimeAway() {
+        val now = SystemClock.elapsedRealtime()
+        val awayMs = when {
+            lastTickAt > 0 -> if (movingAtLastTick) 0 else now - lastTickAt
+            offSince > 0 -> System.currentTimeMillis() - offSince
+            else -> 0
+        }
+        lastTickAt = now
+        if (awayMs >= AWAY_MIN_MS) onBackFromAway(awayMs)
+    }
+
+    /** The car slept or was off for [awayMs]: prompts waiting from before are dropped, and the time counts as a stop. */
+    private fun onBackFromAway(awayMs: Long) {
+        val stopSec = awayMs / 1000 * demo.timeScale
+        val dropped = voice.discardPending()
+        askingPassenger = false
+        log("app was not running for ${awayMs / 1000}s, counted as a ${stopSec / 60}-minute stop, dropped $dropped voice prompts")
+        addStop(stopSec)
+    }
+
+    private fun addStop(sec: Long) {
+        if (trip.continuousSec <= 0) return
+        trip.parkedSec += sec
+        if (trip.parkedSec < CareConfig.REST_RESET_SEC) return
+        trip.continuousSec = 0
+        trip.lastPostureSec = 0
+        trip.lastRestAskSec = -1
+        // A short trip that was never scored ends quietly after a long stop.
+        if (trip.active) {
+            trip.active = false
+            trip.passengerType = null
+            trip.boardingDone = false
+            trip.storyRequested = false
+        }
     }
 
     private fun startTrip() {
@@ -377,7 +414,7 @@ class CareEngine(
     }
 
     // ---------------------------------------------------------------- demo and tests
-    /** Commands from the demo panel or adb: `timescale:60`, `cabin:31`, `answer:yes`, `trigger:rest`, ... */
+    /** Commands from the demo panel or adb: `timescale:60`, `cabin:31`, `answer:yes`, `trigger:rest`, `away:1800`, ... */
     fun onDemoCommand(command: String) {
         log("demo command: $command")
         val name = command.substringBefore(':')
@@ -388,6 +425,8 @@ class CareEngine(
             "answer" -> voice.injectedAnswer = arg.takeIf { it.isNotEmpty() && it != "off" }?.let(::answerAudio)
             "mode" -> setUserMode(UserMode.valueOf(arg.uppercase()))
             "drive" -> trip.continuousSec = arg.toLongOrNull() ?: trip.continuousSec
+            // The emulator cannot Suspend, so this runs what a wake-up after `away:<seconds>` would run.
+            "away" -> arg.toLongOrNull()?.let { onBackFromAway(it * 1000) }
             "route" -> arg.split(",").takeIf { it.size >= 3 }?.let { p ->
                 navi.addStop(p[2], p[0].toDouble(), p[1].toDouble()) { log("demo route $it") }
             }
@@ -435,6 +474,9 @@ class CareEngine(
 
     private companion object {
         const val TICK_MS = 1_000L
+
+        /** Shorter gaps (a restarted process, a busy main thread) are not counted as a stop. */
+        const val AWAY_MIN_MS = 30_000L
         const val SPEED_WINDOW_MS = 1_000L
         const val EVENT_LATCH_MS = 5_000L
         const val TRIP_END_DELAY_MS = 3_000L

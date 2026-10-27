@@ -146,6 +146,27 @@ class VoiceAgent(private val context: Context) {
         if (current is Job.Story) tts.stop()
     }
 
+    /**
+     * Drops everything waiting to be said or heard, without calling back. Used after Suspend: the Pleos Suspend
+     * guide says not to restore earlier audio on resume, and a question from before the stop is stale anyway.
+     * Returns how many prompts were dropped.
+     */
+    fun discardPending(): Int {
+        val dropped = queue.size + (if (current != null) 1 else 0)
+        queue.clear()
+        storyActive = false
+        listening?.let {
+            main.removeCallbacks(timeout)
+            if (!it.injected && sttReady) stt.stop()
+        }
+        listening = null
+        if (current != null) {
+            current = null
+            if (ttsReady) tts.stop()
+        }
+        return dropped
+    }
+
     // ---------------------------------------------------------------- queue
     private fun pump() {
         if (current != null || !ttsReady) return

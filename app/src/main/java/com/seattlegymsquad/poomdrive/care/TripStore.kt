@@ -46,7 +46,10 @@ data class TripSummary(
  */
 class TripStore(context: Context) {
     private val prefs = context.getSharedPreferences("trip", Context.MODE_PRIVATE)
-    private var lastSave = 0L
+
+    /** Wall-clock time of the last save. After a restart it tells how long the app was not running. */
+    var savedAt: Long = prefs.getLong("savedAt", 0)
+        private set
 
     var userMode: UserMode = UserMode.valueOf(prefs.getString("userMode", UserMode.AUTO.name)!!)
         set(value) {
@@ -87,9 +90,10 @@ class TripStore(context: Context) {
 
     fun save(force: Boolean = false) {
         val now = System.currentTimeMillis()
-        if (!force && now - lastSave < SAVE_INTERVAL_MS) return
-        lastSave = now
+        if (!force && now - savedAt < SAVE_INTERVAL_MS) return
+        savedAt = now
         prefs.edit()
+            .putLong("savedAt", now)
             .putBoolean("active", trip.active)
             .putLong("drivingSec", trip.drivingSec)
             .putLong("continuousSec", trip.continuousSec)

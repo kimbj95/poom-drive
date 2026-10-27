@@ -45,7 +45,10 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildScreen())
-        requestPermissions(arrayOf(Car.PERMISSION_SPEED, Manifest.permission.POST_NOTIFICATIONS), REQUEST_PERMISSIONS)
+        requestPermissions(
+            arrayOf(Car.PERMISSION_SPEED, Manifest.permission.POST_NOTIFICATIONS, Manifest.permission.BLUETOOTH_CONNECT),
+            REQUEST_PERMISSIONS,
+        )
         PoomService.start(this)
     }
 

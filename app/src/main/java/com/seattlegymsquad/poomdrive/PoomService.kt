@@ -42,6 +42,7 @@ class PoomService : Service() {
     override fun onCreate() {
         super.onCreate()
         startInForeground()
+        StartPrompt.dismiss(this)
         state = VehicleState()
         store = TripStore(this)
         demo = DemoSettings(this)
