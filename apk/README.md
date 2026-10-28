@@ -1,6 +1,5 @@
 # 제출용 APK
 
-공모전 제출 안내에 따라 실행 가능한 release APK를 이 폴더에 업로드합니다.
-
-- 파일명: `팀명_앱이름_release.apk`
-- 용량 초과 시: GitHub Releases에 등록 후 Release 페이지 주소 제출
+- 파일: `시애틀헬스부_품드라이브_release.apk` (서명된 release 빌드, 버전 0.1.0)
+- 파일명 규칙: 공모전 제출 안내의 `팀명_앱이름_release.apk`
+- 설치와 실행: [저장소 README의 실행 방법](../README.md#실행-방법-apk)

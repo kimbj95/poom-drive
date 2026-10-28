@@ -58,18 +58,37 @@
 | 시간 경과 | '20분 뒤' 등의 구간은 시연 명령으로 앱의 시간을 빠르게 진행하고, 영상에서는 잘라 냈습니다. |
 | 설명 화면 | 자막, 장면 제목, 차량 신호 패널, 속도·핸들 그래프는 이해를 돕기 위해 덧붙인 화면입니다. |
 
+## 실행 방법 (APK)
+- APK 파일: [apk/시애틀헬스부_품드라이브_release.apk](apk/시애틀헬스부_품드라이브_release.apk) (서명된 release 빌드)
+1. 설치: `adb install -r apk/시애틀헬스부_품드라이브_release.apk`
+2. 권한 허용 (첫 실행 때 표시되는 창에서 허용해도 됩니다)
+   ```
+   adb shell pm grant --user 10 com.seattlegymsquad.poomdrive android.car.permission.CAR_SPEED
+   adb shell pm grant --user 10 com.seattlegymsquad.poomdrive android.permission.POST_NOTIFICATIONS
+   adb shell pm grant --user 10 com.seattlegymsquad.poomdrive android.permission.BLUETOOTH_CONNECT
+   ```
+3. 실행: `adb shell am start --user 10 -n com.seattlegymsquad.poomdrive/.MainActivity`
+- 한 번 실행한 뒤에는 부팅할 때마다 케어 서비스가 자동으로 시작됩니다.
+- 디버그 빌드가 설치되어 있으면 서명이 달라 덮어 설치되지 않습니다. `adb uninstall com.seattlegymsquad.poomdrive` 후 설치합니다.
+
+## 테스트 환경 및 설정
+- 테스트 환경: Pleos Connect Emulator v2.1.0 (Android Automotive OS, Android 14). 설치 방법은 [Pleos Connect 개발 환경 설정 가이드](https://document.pleos.ai/docs/connect/guide/getting-started/application-development/setup-connect-sdk-emulator)를 따릅니다.
+- 앱은 사용자 10에서 실행되므로 adb 명령에 `--user 10`을 붙입니다.
+- 차량 신호(기어, 차속, 좌석 탑승, 공조): 에뮬레이터의 Virtual Console(에뮬레이터 안 8088 포트)로 입력합니다. `adb forward tcp:8088 tcp:8088` 후 브라우저에서 `http://127.0.0.1:8088/`을 엽니다. Windows에서 8088 포트가 예약되어 있으면 `adb forward tcp:18088 tcp:8088`과 18088 포트를 사용합니다.
+- 음성 대답: PC 마이크로 답하려면 `adb emu avd hostmicon`을 실행합니다. 마이크 없이 시험할 때는 [시연 명령](#시연-명령)의 `answer:`로 미리 녹음한 대답을 넣습니다.
+- 에뮬레이터에서 재현하기 어려운 상황(장시간 주행, 휴대폰 연결 등)은 [시연 명령](#시연-명령)으로 재현합니다.
+
 ## 개발 환경
 - 언어: Kotlin
 - 플랫폼: Pleos Connect (Android Automotive OS, Android 14)
 - 빌드: Gradle 8.10.2, Android Gradle Plugin 8.8.2, Kotlin 2.0.0
 - SDK: Vehicle 2.3.2, NaviHelper 3.0.5, TextToSpeech·SpeechToText 3.3.1
 
-## 빌드와 실행
+## 소스에서 빌드
 1. `local.properties`에 Android SDK 경로(`sdk.dir`)를 지정합니다.
-2. 빌드: `./gradlew assembleDebug`
-3. 설치: `adb install -r app/build/outputs/apk/debug/app-debug.apk`
-4. 차속 권한 허용: `adb shell pm grant --user 10 com.seattlegymsquad.poomdrive android.car.permission.CAR_SPEED`
-5. 실행: `adb shell am start --user 10 -n com.seattlegymsquad.poomdrive/.MainActivity`
+2. 빌드: `./gradlew assembleDebug` (설치 파일: `app/build/outputs/apk/debug/app-debug.apk`)
+3. release 빌드: 저장소 최상위에 `keystore.properties`(`storeFile`, `storePassword`, `keyAlias`, `keyPassword`)를 두고 `./gradlew assembleRelease`를 실행합니다. 서명 키와 이 파일은 저장소에 올리지 않습니다.
+4. 설치와 실행은 [실행 방법](#실행-방법-apk)과 같습니다.
 
 ## 시연 명령
 에뮬레이터에서 재현하기 어려운 상황은 adb 전용 명령으로 재현합니다. 정차 화면의 제목을 3초 누르면 자주 쓰는 명령을 버튼으로 실행할 수 있습니다.
@@ -105,5 +124,5 @@ adb shell am broadcast --user 10 -a com.seattlegymsquad.poomdrive.DEMO -n com.se
 | `app/src/main/java/.../care` | 케어 규칙, 주행 기록 저장, 시연 설정 |
 | `app/src/main/java/.../data` | 졸음쉼터 데이터, 동화 |
 | `app/src/main/assets` | 졸음쉼터 데이터, 동화 본문, 시연용 대답 음성, 글꼴과 라이선스 |
-| `apk/` | 제출용 release APK |
-| `docs/` | 검증 결과 |
+| `apk/` | 제출용 release APK (`시애틀헬스부_품드라이브_release.apk`) |
+| `docs/` | 검증 결과, 화면 캡처, 시연 영상 |
