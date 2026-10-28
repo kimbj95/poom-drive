@@ -48,7 +48,7 @@ class PoomService : Service() {
         demo = DemoSettings(this)
         voice = VoiceAgent(this)
         navi = NaviAgent(this)
-        care = CareEngine(this, state, voice, navi, store, demo, RestAreaRepository(this), StoryBook(this))
+        care = CareEngine(this, state, voice, navi, store, demo, RestAreaRepository(this), StoryBook(this), ::updateStatus)
         monitor = VehicleMonitor(this, state, care)
         voice.start()
         navi.start()
@@ -58,7 +58,14 @@ class PoomService : Service() {
         log("service created")
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Started again after the car slept: say so once, as nothing on screen shows it while driving.
+        when (intent?.getStringExtra(StartPrompt.EXTRA_STARTED_BY)) {
+            StartPrompt.BY_PHONE -> voice.say(getString(R.string.started_by_phone))
+            StartPrompt.BY_PROMPT -> voice.say(getString(R.string.started_by_prompt))
+        }
+        return START_STICKY
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -77,17 +84,32 @@ class PoomService : Service() {
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL, getString(R.string.notification_channel), NotificationManager.IMPORTANCE_LOW)
         )
+        startForeground(NOTIFICATION_ID, buildNotification(getString(R.string.app_name)), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+    }
+
+    /**
+     * Puts the care status in the notification title ("품 드라이브 · 아이 동승 · 흔들림 2번"). The Pleos notification
+     * center draws this app's body text very faintly, so the title carries what matters. No pop-up: it is seen
+     * only when the notification center is opened.
+     */
+    private fun updateStatus(status: String) {
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIFICATION_ID, buildNotification("${getString(R.string.app_name)} · $status"))
+    }
+
+    private fun buildNotification(title: String): Notification {
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val notification = Notification.Builder(this, CHANNEL)
-            .setContentTitle(getString(R.string.app_name))
+        return Notification.Builder(this, CHANNEL)
+            .setContentTitle(title)
             .setContentText(getString(R.string.notification_text))
-            .setSmallIcon(R.drawable.ic_launcher)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentIntent(open)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setGroup(CHANNEL)
             .build()
-        startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
     }
 
     companion object {

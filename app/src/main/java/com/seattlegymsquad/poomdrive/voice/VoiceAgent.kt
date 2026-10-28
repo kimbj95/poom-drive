@@ -22,6 +22,9 @@ import ai.pleos.playground.tts.constant.ErrorType as TtsErrorType
 import ai.pleos.playground.tts.constant.Mode as TtsMode
 import ai.pleos.playground.tts.listener.OnInitializeListener as TtsInitializeListener
 
+/** One sentence of a story and the pause after it. */
+class StoryLine(val text: String, val pauseAfterMs: Long)
+
 /**
  * One voice for the whole app, on the Pleos on-device TTS and STT (no network, no app registration).
  * Utterances are queued so they never overlap. A question is followed by a short beep when the microphone
@@ -32,7 +35,7 @@ class VoiceAgent(private val context: Context) {
 
     private sealed class Job {
         class Say(val text: String) : Job()
-        class Story(val text: String) : Job()
+        class Story(val line: StoryLine) : Job()
         class Ask(
             val question: String,
             val parse: (String) -> Any?,
@@ -55,9 +58,12 @@ class VoiceAgent(private val context: Context) {
     private val queue = ArrayDeque<Job>()
     private var current: Job? = null
     private var listening: Listening? = null
-    private var story: List<String> = emptyList()
+    private var story: List<StoryLine> = emptyList()
     private var storyIndex = 0
     private var storyActive = false
+
+    /** The story waits until this time (elapsedRealtime) before its next sentence. */
+    private var storyResumeAt = 0L
 
     /** Raw 16 kHz mono PCM fed to the recognizer instead of the microphone at the next question (demo, tests). */
     var injectedAnswer: ByteArray? = null
@@ -131,11 +137,12 @@ class VoiceAgent(private val context: Context) {
         pump()
     }
 
-    fun startStory(paragraphs: List<String>) {
-        story = paragraphs
+    fun startStory(lines: List<StoryLine>) {
+        story = lines
         storyIndex = 0
-        storyActive = paragraphs.isNotEmpty()
-        log("story start (${paragraphs.size} parts)")
+        storyActive = lines.isNotEmpty()
+        storyResumeAt = 0L
+        log("story start (${lines.size} parts)")
         pump()
     }
 
@@ -174,13 +181,13 @@ class VoiceAgent(private val context: Context) {
         current = next
         when (next) {
             is Job.Say -> speak(next.text)
-            is Job.Story -> speak(next.text)
+            is Job.Story -> speak(next.line.text)
             is Job.Ask -> speak(next.question)
         }
     }
 
     private fun nextStoryPart(): Job? {
-        if (!storyActive) return null
+        if (!storyActive || SystemClock.elapsedRealtime() < storyResumeAt) return null
         if (storyIndex >= story.size) {
             storyActive = false
             log("story finished")
@@ -200,9 +207,15 @@ class VoiceAgent(private val context: Context) {
             listen(job)
             return
         }
-        // An interrupted story paragraph is read again from its beginning after the urgent message.
+        // An interrupted story sentence is read again from its start after the urgent message.
         if (job is Job.Story && interrupted && storyActive) storyIndex = (storyIndex - 1).coerceAtLeast(0)
         current = null
+        if (storyActive) {
+            // A pause after each story sentence, and a breath before the story goes on after anything else.
+            val pause = if (job is Job.Story && !interrupted) job.line.pauseAfterMs else RESUME_PAUSE_MS
+            storyResumeAt = SystemClock.elapsedRealtime() + pause
+            main.postDelayed(::pump, pause)
+        }
         pump()
     }
 
@@ -346,5 +359,6 @@ class VoiceAgent(private val context: Context) {
         const val READY_LIMIT_MS = 20_000L
         const val BEEP_MS = 120
         const val BEEP_HZ = 880.0
+        const val RESUME_PAUSE_MS = 800L
     }
 }

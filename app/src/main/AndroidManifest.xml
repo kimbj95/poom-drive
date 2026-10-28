@@ -34,7 +34,7 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
     <application
-        android:icon="@drawable/ic_launcher"
+        android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
 
@@ -75,6 +75,11 @@
                 <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
             </intent-filter>
         </receiver>
+
+        <!-- Taps on the "누가 탔나요?" notification's choices (sent only by our own PendingIntents). -->
+        <receiver
+            android:name=".PassengerPickReceiver"
+            android:exported="false" />
 
         <!-- Demo and test commands from adb only: the DUMP permission is held by the shell, not by apps. -->
         <receiver

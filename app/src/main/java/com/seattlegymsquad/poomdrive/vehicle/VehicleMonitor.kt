@@ -148,7 +148,13 @@ class VehicleMonitor(
 
     private fun doorListener(door: String) = object : DoorPositionListener {
         override fun onPositionUpdated(pos: Int?) {
-            state.doorOpen[door] = (pos ?: 0) > 0
+            val open = (pos ?: 0) > 0
+            // The first report on registration is the current state, not a change.
+            val before = state.doorOpen.put(door, open)
+            if (before != null && before != open) {
+                log("door $door open=$open")
+                main.post { listener.onDoorChanged(door, open) }
+            }
         }
 
         override fun onFailed(e: Exception) = log("door $door failed: $e")

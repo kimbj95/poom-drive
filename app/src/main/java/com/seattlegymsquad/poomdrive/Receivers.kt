@@ -17,11 +17,11 @@ class BootReceiver : BroadcastReceiver() {
 
 /**
  * Covers a car that came back from Suspend without our process: the driver's phone reconnecting over Bluetooth
- * wakes the app even when it is not running (an exempt broadcast), and [StartPrompt] asks to start again.
+ * wakes the app even when it is not running (an exempt broadcast), and [StartPrompt] starts the service or asks to.
  */
 class PhoneConnectReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == BluetoothDevice.ACTION_ACL_CONNECTED) StartPrompt.onPhoneConnected(context)
+        if (intent.action == BluetoothDevice.ACTION_ACL_CONNECTED) StartPrompt.onPhoneConnected(context, goAsync())
     }
 }
 
@@ -34,7 +34,7 @@ class DemoReceiver : BroadcastReceiver() {
         val command = intent.getStringExtra("cmd") ?: return
         when (command) {
             // adb cannot send the protected ACL_CONNECTED broadcast, and the emulator has no Bluetooth.
-            "bt:connected" -> StartPrompt.onPhoneConnected(context)
+            "bt:connected" -> StartPrompt.onPhoneConnected(context, goAsync())
             // Stands in for the system stopping the app during Suspend.
             "service:stop" -> {
                 log("demo command: $command")

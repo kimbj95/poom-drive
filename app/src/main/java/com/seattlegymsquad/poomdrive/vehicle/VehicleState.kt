@@ -41,6 +41,7 @@ class VehicleState {
 /** Events the care engine reacts to immediately, all delivered on the main thread. */
 interface VehicleListener {
     fun onOccupancyChanged() {}
+    fun onDoorChanged(door: String, open: Boolean) {}
     fun onGearChanged(gear: Gear) {}
     fun onSpeed(kmh: Float, timeMs: Long) {}
     fun onSteering(deg: Float, timeMs: Long) {}
