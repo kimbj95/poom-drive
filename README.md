@@ -125,4 +125,4 @@ adb shell am broadcast --user 10 -a com.seattlegymsquad.poomdrive.DEMO -n com.se
 | `app/src/main/java/.../data` | 졸음쉼터 데이터, 동화 |
 | `app/src/main/assets` | 졸음쉼터 데이터, 동화 본문, 시연용 대답 음성, 글꼴과 라이선스 |
 | `apk/` | 제출용 release APK (`시애틀헬스부_품드라이브_release.apk`) |
-| `docs/` | 검증 결과, 화면 캡처, 시연 영상 |
+| `docs/` | 검증 결과, 화면 캡처, 시연 영상, 기획서 출처(`sources.md`) |
